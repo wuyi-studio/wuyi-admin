@@ -825,6 +825,24 @@
             <!-- 動態填入 -->
           </div>
         </div>
+
+        <!-- 結帳動作列 -->
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button 
+            type="button" 
+            onclick="saveAndSyncCashierSummary()"
+            class="py-2.5 px-3 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-sm transition"
+          >
+            <span>☁️ 同步今日營收至雲端</span>
+          </button>
+          <a 
+            href="https://wuyi-studio.github.io/wuyi-cashier/" 
+            target="_blank"
+            class="py-2.5 px-3 bg-white hover:bg-blue-50 active:scale-95 text-blue-700 font-bold border border-blue-300 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-sm transition text-center"
+          >
+            <span>💳 開啟櫃檯收銀 POS ↗</span>
+          </a>
+        </div>
       </div>
     </section>
 
@@ -1077,6 +1095,22 @@
         flowerDatesState[dStr] = isOpen;
       }
 
+      // 優先載入本地各網站快取 (與 4 大獨立網站本機 key 保持即時同步)
+      try {
+        const cachedCake = JSON.parse(localStorage.getItem("wuyi_cake_date_status_v1"));
+        if (cachedCake && typeof cachedCake === "object") {
+          for (const k in cachedCake) cakeOrderDatesState[k] = (cachedCake[k] === true || cachedCake[k] === "open");
+        }
+        const cachedThisweek = JSON.parse(localStorage.getItem("wuyi_cakethisweek_date_status_v1"));
+        if (cachedThisweek && typeof cachedThisweek === "object") {
+          for (const k in cachedThisweek) thisweekDatesState[k] = (cachedThisweek[k] === true || cachedThisweek[k] === "open");
+        }
+        const cachedFlower = JSON.parse(localStorage.getItem("wuyi_date_status_map_v2") || localStorage.getItem("wuyi_flower_date_status_v1"));
+        if (cachedFlower && typeof cachedFlower === "object") {
+          for (const k in cachedFlower) flowerDatesState[k] = (cachedFlower[k] === true || cachedFlower[k] === "open");
+        }
+      } catch (e) {}
+
       renderBurgerLetterChips();
       renderBurgerNumberRows();
       renderBurgerSpecialsChips();
@@ -1240,6 +1274,32 @@
     }
 
     async function loadRemoteBurgerConfig() {
+      // 1. 首選：連動 Google 試算表雲端今日現貨款式 (與 wuyi-burger 相同來源)
+      try {
+        const gasUrl = localStorage.getItem(GOOGLE_SHEET_API_KEY) || DEFAULT_GAS_URL;
+        const res = await fetch(`${gasUrl}?type=burger&_t=${Date.now()}`, { cache: "no-store" });
+        if (res.ok) {
+          const json = await res.json();
+          const data = (json && json.data) ? json.data : json;
+          const styles = (data && (data.burgerStyles || data.styles)) || (data && data.burger && data.burger.styles);
+          if (Array.isArray(styles) && styles.length > 0) {
+            burgerSelectedSet = new Set(styles);
+            renderBurgerLetterChips();
+            renderBurgerNumberRows();
+            renderBurgerSpecialsChips();
+            updateBurgerSelectedBadge();
+          }
+          const vDate = (data && (data.burgerValidDate || data.validDate)) || (data && data.burger && data.burger.validDate);
+          if (vDate) {
+            const todayStr = formatYMD(new Date());
+            const chk = document.getElementById("burgerLockTodayChk");
+            if (chk) chk.checked = (vDate === todayStr);
+          }
+          return;
+        }
+      } catch (e) {}
+
+      // 2. 備援：讀取靜態配置
       try {
         const url = `https://raw.githubusercontent.com/a0952015080-netizen/wuyi-burger/main/burger-config.json?_t=${Date.now()}`;
         const res = await fetch(url, { cache: "no-store" });
@@ -1375,29 +1435,50 @@
     async function saveAndSyncCakeOrderSystem() {
       const btn = document.getElementById("cakeOrderSaveBtn");
       btn.disabled = true;
-      btn.textContent = "⏳ 正在同步蛋糕訂購排程至雲端...";
+      btn.textContent = "⏳ 正在同步蛋糕訂購排程至 Google 試算表雲端...";
 
-      const closedDates = Object.keys(cakeOrderDatesState).filter(k => cakeOrderDatesState[k] === false);
-      const specialOpenDates = Object.keys(cakeOrderDatesState).filter(k => cakeOrderDatesState[k] === true);
+      let closedDates = [];
+      let specialOpenDates = [];
+      for (let dStr in cakeOrderDatesState) {
+        if (cakeOrderDatesState[dStr] === false) {
+          closedDates.push(dStr);
+        } else if (cakeOrderDatesState[dStr] === true) {
+          const parts = dStr.split('-');
+          const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+          if (d.getDay() === 1) specialOpenDates.push(dStr);
+        }
+      }
+
+      const isBlockMon = document.getElementById("orderBlockMondayChk").checked;
+      const minD = parseInt(document.getElementById("orderMinDaysSelect").value);
+      const maxD = parseInt(document.getElementById("orderMaxDaysSelect").value);
+
+      // 本地快取 (與 wuyi-order 客戶端完全相容)
+      try {
+        localStorage.setItem("wuyi_cake_date_status_v1", JSON.stringify(cakeOrderDatesState));
+        localStorage.setItem("wuyi_cake_disable_monday_v1", JSON.stringify(isBlockMon));
+      } catch (e) {}
 
       try {
         await syncToGoogleSheet({
           type: "cake",
-          calendarDateStatus: cakeOrderDatesState,
-          cakeOrderDates: cakeOrderDatesState,
+          category: "cake",
+          updatedAt: new Date().toISOString(),
+          disableMonday: isBlockMon,
+          minDays: minD,
+          maxDays: maxD,
           closedDates: closedDates,
           orderClosedDates: closedDates,
           specialOpenDates: specialOpenDates,
           orderSpecialOpenDates: specialOpenDates,
-          disableMonday: document.getElementById("orderBlockMondayChk").checked,
-          minDays: parseInt(document.getElementById("orderMinDaysSelect").value),
-          maxDays: parseInt(document.getElementById("orderMaxDaysSelect").value)
+          calendarDateStatus: Object.assign({}, cakeOrderDatesState),
+          cakeOrderDates: Object.assign({}, cakeOrderDatesState)
         });
 
-        showGlobalAlert("🎉 蛋糕訂購 (wuyi-order) 日曆排程已同步至雲端！", "success");
+        showGlobalAlert("🎉 蛋糕訂購 (wuyi-order) 日曆排程已成功同步至 Google 試算表！客人開啟即生效！", "success");
         showToast("蛋糕訂購排程同步完成！");
       } catch (err) {
-        showGlobalAlert(`⚠️ 蛋糕訂購同步失敗：${err.message}`, "error");
+        showGlobalAlert(`⚠️ 蛋糕訂購同步至 Google 試算表失敗：${err.message}`, "error");
       } finally {
         btn.disabled = false;
         btn.textContent = "💾 單獨儲存並推送到「蛋糕訂購 (wuyi-order)」";
@@ -1489,27 +1570,46 @@
     async function saveAndSyncThisweekSystem() {
       const btn = document.getElementById("thisweekSaveBtn");
       btn.disabled = true;
-      btn.textContent = "⏳ 正在同步當週公版排程至雲端...";
+      btn.textContent = "⏳ 正在同步當週公版排程至 Google 試算表雲端...";
 
-      const closedDates = Object.keys(thisweekDatesState).filter(k => thisweekDatesState[k] === false);
-      const specialOpenDates = Object.keys(thisweekDatesState).filter(k => thisweekDatesState[k] === true);
+      let closedDates = [];
+      let specialOpenDates = [];
+      for (let dStr in thisweekDatesState) {
+        if (thisweekDatesState[dStr] === false) {
+          closedDates.push(dStr);
+        } else if (thisweekDatesState[dStr] === true) {
+          const parts = dStr.split('-');
+          const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+          if (d.getDay() === 1) specialOpenDates.push(dStr);
+        }
+      }
+
+      const isBlockMon = document.getElementById("thisweekBlockMonChk").checked;
+
+      // 本地快取 (與 wuyi-cakethisweek 客戶端完全相容)
+      try {
+        localStorage.setItem("wuyi_cakethisweek_date_status_v1", JSON.stringify(thisweekDatesState));
+        localStorage.setItem("wuyi_cakethisweek_disable_monday_v1", JSON.stringify(isBlockMon));
+      } catch (e) {}
 
       try {
         await syncToGoogleSheet({
           category: "cakethisweek_calander",
-          calendarDateStatus: thisweekDatesState,
-          thisweekDates: thisweekDatesState,
+          type: "cakethisweek",
+          updatedAt: new Date().toISOString(),
+          disableMonday: isBlockMon,
           closedDates: closedDates,
           thisweekClosedDates: closedDates,
           specialOpenDates: specialOpenDates,
           thisweekSpecialOpenDates: specialOpenDates,
-          disableMonday: document.getElementById("thisweekBlockMonChk").checked
+          calendarDateStatus: Object.assign({}, thisweekDatesState),
+          thisweekDates: Object.assign({}, thisweekDatesState)
         });
 
-        showGlobalAlert("🎉 當週公版蛋糕 (wuyi-cakethisweek) 排程儲存成功！", "success");
+        showGlobalAlert("🎉 當週公版蛋糕 (wuyi-cakethisweek) 排程已成功同步至 Google 試算表！客人開啟即生效！", "success");
         showToast("當週公版排程同步完成！");
       } catch (err) {
-        showGlobalAlert(`⚠️ 當週公版同步失敗：${err.message}`, "error");
+        showGlobalAlert(`⚠️ 當週公版同步至 Google 試算表失敗：${err.message}`, "error");
       } finally {
         btn.disabled = false;
         btn.textContent = "💾 單獨儲存並推送到「當週公版 (wuyi-cakethisweek)」";
@@ -1541,8 +1641,11 @@
           const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
           flowerDatesState[formatYMD(d)] = (d.getDay() !== 1);
         }
-        showToast("鮮花預訂：已恢復常態預設");
+        showToast("鮮花預訂：已恢復常態預設（週一固定公休）");
       }
+      try {
+        localStorage.setItem("wuyi_date_status_map_v2", JSON.stringify(flowerDatesState));
+      } catch (e) {}
       renderFlowerDaysGrid();
     }
 
@@ -1575,6 +1678,9 @@
 
         cell.onclick = () => {
           flowerDatesState[dStr] = !flowerDatesState[dStr];
+          try {
+            localStorage.setItem("wuyi_date_status_map_v2", JSON.stringify(flowerDatesState));
+          } catch (e) {}
           renderFlowerDaysGrid();
         };
 
@@ -1592,26 +1698,49 @@
     async function saveAndSyncFlowerSystem() {
       const btn = document.getElementById("flowerSaveBtn");
       btn.disabled = true;
-      btn.textContent = "⏳ 正在同步門市花束預訂至雲端...";
+      btn.textContent = "⏳ 正在同步門市花束預訂至 Google 試算表雲端...";
 
-      const closedDates = Object.keys(flowerDatesState).filter(k => flowerDatesState[k] === false);
-      const specialOpenDates = Object.keys(flowerDatesState).filter(k => flowerDatesState[k] === true);
+      // 1. 依照 wuyi-flower2 的核心演算法計算公休與特別開放日
+      let closed = [];
+      let specialOpen = [];
+      for (let dStr in flowerDatesState) {
+        if (flowerDatesState[dStr] === false) {
+          closed.push(dStr);
+        } else if (flowerDatesState[dStr] === true) {
+          const parts = dStr.split('-');
+          const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+          if (d.getDay() === 1) { // 週一特開
+            specialOpen.push(dStr);
+          }
+        }
+      }
+
+      // 儲存至本地快取 (相容 wuyi-flower2 本機 key)
+      try {
+        localStorage.setItem("wuyi_date_status_map_v2", JSON.stringify(flowerDatesState));
+        localStorage.setItem("wuyi_flower_date_status_v1", JSON.stringify(flowerDatesState));
+      } catch (e) {}
+
+      // 2. 構建完全吻合 wuyi-flower2 與 Google 試算表標準格式的酬載
+      const flowerPayload = {
+        category: "flower",
+        type: "flower",
+        disableMonday: true,
+        closedDates: closed,
+        specialOpenDates: specialOpen,
+        calendarDateStatus: Object.assign({}, flowerDatesState),
+        flowerDates: Object.assign({}, flowerDatesState),
+        flowerClosedDates: closed,
+        flowerSpecialOpenDates: specialOpen,
+        updatedAt: new Date().toISOString()
+      };
 
       try {
-        await syncToGoogleSheet({
-          type: "flower",
-          flowerDates: flowerDatesState,
-          calendarDateStatus: flowerDatesState,
-          closedDates: closedDates,
-          flowerClosedDates: closedDates,
-          specialOpenDates: specialOpenDates,
-          flowerSpecialOpenDates: specialOpenDates
-        });
-
-        showGlobalAlert("🎉 門市花束預訂系統 (wuyi-flower2) 排程儲存成功！", "success");
-        showToast("花束預訂排程同步完成！");
+        await syncToGoogleSheet(flowerPayload);
+        showGlobalAlert("🎉 成功！門市花束預訂排程已儲存至 Google 試算表（與 wuyi-flower2 完全一致）！客人開啟即生效！", "success");
+        showToast("🌸 花束排程已成功儲存至 Google 試算表！");
       } catch (err) {
-        showGlobalAlert(`⚠️ 門市花束預訂同步失敗：${err.message}`, "error");
+        showGlobalAlert(`⚠️ 門市花束預訂同步至 Google 試算表失敗：${err.message}`, "error");
       } finally {
         btn.disabled = false;
         btn.textContent = "💾 單獨儲存並推送到「門市花束預訂 (wuyi-flower2)」";
@@ -1736,6 +1865,39 @@
       copyToClipboard(lines.join("\n"), "今日訂單彙總文字");
     }
 
+    async function saveAndSyncCashierSummary() {
+      const allOrders = loadCashierOrders();
+      const today = getTodayKey();
+      const todayOrders = allOrders.filter(o => {
+        if (!o) return false;
+        if (o.day) return o.day === today;
+        if (o.timestamp && o.timestamp.includes(today)) return true;
+        return false;
+      });
+
+      const totalRev = todayOrders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
+      const cashTotal = todayOrders.filter(o => o.payment === '現金').reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
+      const linePayTotal = todayOrders.filter(o => o.payment === 'Line Pay').reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
+
+      try {
+        await syncToGoogleSheet({
+          type: "cashier",
+          cashierSummary: {
+            date: today,
+            totalRevenue: totalRev,
+            orderCount: todayOrders.length,
+            cashTotal: cashTotal,
+            linePayTotal: linePayTotal,
+            updatedAt: new Date().toISOString()
+          }
+        });
+        showGlobalAlert(`🎉 櫃檯今日營收彙總 ($${totalRev.toLocaleString()}) 已成功同步至 Google 雲端試算表！`, "success");
+        showToast("收銀營收數據同步完成！");
+      } catch (err) {
+        showGlobalAlert(`⚠️ 櫃檯收銀同步失敗：${err.message}`, "error");
+      }
+    }
+
     function addNewQuickTestOrder() {
       const now = new Date();
       const timeStr = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -1772,11 +1934,59 @@
       btn.innerHTML = `<span>⏳ 同步中...</span>`;
       showGlobalAlert("⚡ 正在執行全店一鍵大同步至 Google 雲端中樞...", "info");
 
-      const closedDates = Object.keys(cakeOrderDatesState).filter(k => cakeOrderDatesState[k] === false);
-      const specialOpenDates = Object.keys(cakeOrderDatesState).filter(k => cakeOrderDatesState[k] === true);
+      // 蛋糕/公版計算公休與週一特開
+      let closedDates = [];
+      let specialOpenDates = [];
+      for (let dStr in cakeOrderDatesState) {
+        const parts = dStr.split('-');
+        const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        if (cakeOrderDatesState[dStr] === false) closedDates.push(dStr);
+        if (cakeOrderDatesState[dStr] === true && d.getDay() === 1) specialOpenDates.push(dStr);
+      }
+
+      // 花藝計算公休與週一特開 (吻合 wuyi-flower2)
+      let flowerClosed = [];
+      let flowerSpecialOpen = [];
+      for (let dStr in flowerDatesState) {
+        const parts = dStr.split('-');
+        const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        if (flowerDatesState[dStr] === false) flowerClosed.push(dStr);
+        if (flowerDatesState[dStr] === true && d.getDay() === 1) flowerSpecialOpen.push(dStr);
+      }
+
+      let thisweekClosed = [];
+      let thisweekSpecialOpen = [];
+      for (let dStr in thisweekDatesState) {
+        const parts = dStr.split('-');
+        const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        if (thisweekDatesState[dStr] === false) thisweekClosed.push(dStr);
+        if (thisweekDatesState[dStr] === true && d.getDay() === 1) thisweekSpecialOpen.push(dStr);
+      }
+
+      // 同步本地各網站快取
+      try {
+        localStorage.setItem("wuyi_cake_date_status_v1", JSON.stringify(cakeOrderDatesState));
+        localStorage.setItem("wuyi_cakethisweek_date_status_v1", JSON.stringify(thisweekDatesState));
+        localStorage.setItem("wuyi_date_status_map_v2", JSON.stringify(flowerDatesState));
+        localStorage.setItem("wuyi_flower_date_status_v1", JSON.stringify(flowerDatesState));
+      } catch (e) {}
+
       const activeBurgerStyles = getBurgerAllActiveStyles();
       const lockToday = document.getElementById("burgerLockTodayChk").checked;
       const validDate = lockToday ? formatYMD(new Date()) : "";
+
+      // 彙總今日收銀統計
+      const allOrders = loadCashierOrders();
+      const today = getTodayKey();
+      const todayOrders = allOrders.filter(o => {
+        if (!o) return false;
+        if (o.day) return o.day === today;
+        if (o.timestamp && o.timestamp.includes(today)) return true;
+        return false;
+      });
+      const totalRev = todayOrders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
+      const cashTotal = todayOrders.filter(o => o.payment === '現金').reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
+      const linePayTotal = todayOrders.filter(o => o.payment === 'Line Pay').reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
 
       try {
         await syncToGoogleSheet({
@@ -1785,21 +1995,38 @@
           calendarDateStatus: cakeOrderDatesState,
           closedDates: closedDates,
           specialOpenDates: specialOpenDates,
-          // 各系統專屬鍵值同步
+          // 蛋糕訂購 (wuyi-order)
           cakeOrderDates: cakeOrderDatesState,
           orderClosedDates: closedDates,
           orderSpecialOpenDates: specialOpenDates,
+          // 當週公版 (wuyi-cakethisweek)
+          category: "cakethisweek_calander",
           thisweekDates: thisweekDatesState,
-          thisweekClosedDates: closedDates,
-          thisweekSpecialOpenDates: specialOpenDates,
+          thisweekClosedDates: thisweekClosed,
+          thisweekSpecialOpenDates: thisweekSpecialOpen,
+          cakethisweek_calander: {
+            updatedAt: new Date().toISOString(),
+            disableMonday: true,
+            calendarDateStatus: thisweekDatesState
+          },
+          // 門市花束 (wuyi-flower2)
           flowerDates: flowerDatesState,
-          flowerClosedDates: closedDates,
-          flowerSpecialOpenDates: specialOpenDates,
-          // 漢堡盒現貨
+          flowerClosedDates: flowerClosed,
+          flowerSpecialOpenDates: flowerSpecialOpen,
+          // 現貨漢堡盒 (wuyi-burger)
           burgerStyles: activeBurgerStyles,
           styles: activeBurgerStyles,
           burgerValidDate: validDate,
-          validDate: validDate
+          validDate: validDate,
+          // 櫃檯收銀統計 (wuyi-cashier)
+          cashierSummary: {
+            date: today,
+            totalRevenue: totalRev,
+            orderCount: todayOrders.length,
+            cashTotal: cashTotal,
+            linePayTotal: linePayTotal,
+            updatedAt: new Date().toISOString()
+          }
         });
 
         showGlobalAlert("🎉 全店 4 大專案網站已全數同步完成！顧客開啟皆即時生效！", "success");
@@ -1835,12 +2062,21 @@
 
     async function loadRemoteMasterSchedules() {
       try {
+        // 先嘗試載入本地快取 (與 wuyi-flower2 本機 key 保持一致)
+        try {
+          const flowerCached = JSON.parse(localStorage.getItem("wuyi_date_status_map_v2") || localStorage.getItem("wuyi_flower_date_status_v1"));
+          if (flowerCached && typeof flowerCached === "object") {
+            Object.assign(flowerDatesState, flowerCached);
+          }
+        } catch (e) {}
+
         const gasUrl = localStorage.getItem(GOOGLE_SHEET_API_KEY) || DEFAULT_GAS_URL;
         const res = await fetch(`${gasUrl}?_t=${Date.now()}`, { cache: "no-store" });
         if (res.ok) {
           const json = await res.json();
           const data = (json && json.data) ? json.data : json;
           if (data) {
+            // 通用日曆狀態
             if (data.calendarDateStatus && typeof data.calendarDateStatus === "object") {
               for (const dStr in data.calendarDateStatus) {
                 const isOpen = (data.calendarDateStatus[dStr] === true || data.calendarDateStatus[dStr] === "open");
@@ -1849,6 +2085,14 @@
                 flowerDatesState[dStr] = isOpen;
               }
             }
+            // 花束專屬日曆狀態 (若有獨立設定則精準對齊)
+            if (data.flowerDates && typeof data.flowerDates === "object") {
+              for (const dStr in data.flowerDates) {
+                const isOpen = (data.flowerDates[dStr] === true || data.flowerDates[dStr] === "open");
+                flowerDatesState[dStr] = isOpen;
+              }
+            }
+            // 通用公休日
             if (Array.isArray(data.closedDates)) {
               data.closedDates.forEach(d => {
                 cakeOrderDatesState[d] = false;
@@ -1856,6 +2100,39 @@
                 flowerDatesState[d] = false;
               });
             }
+            // 花束專屬公休日
+            if (Array.isArray(data.flowerClosedDates)) {
+              data.flowerClosedDates.forEach(d => {
+                flowerDatesState[d] = false;
+              });
+            }
+            // 當週公版專屬排程
+            const thisweekData = data.cakethisweek_calander || data.thisweekDates;
+            if (thisweekData && typeof thisweekData === "object") {
+              const statusObj = thisweekData.calendarDateStatus || thisweekData;
+              for (const dStr in statusObj) {
+                const isOpen = (statusObj[dStr] === true || statusObj[dStr] === "open");
+                thisweekDatesState[dStr] = isOpen;
+              }
+            }
+            if (Array.isArray(data.thisweekClosedDates)) {
+              data.thisweekClosedDates.forEach(d => {
+                thisweekDatesState[d] = false;
+              });
+            }
+            // 蛋糕訂購專屬排程
+            if (data.cakeOrderDates && typeof data.cakeOrderDates === "object") {
+              for (const dStr in data.cakeOrderDates) {
+                const isOpen = (data.cakeOrderDates[dStr] === true || data.cakeOrderDates[dStr] === "open");
+                cakeOrderDatesState[dStr] = isOpen;
+              }
+            }
+            if (Array.isArray(data.orderClosedDates)) {
+              data.orderClosedDates.forEach(d => {
+                cakeOrderDatesState[d] = false;
+              });
+            }
+            // 通用特開日
             if (Array.isArray(data.specialOpenDates)) {
               data.specialOpenDates.forEach(d => {
                 cakeOrderDatesState[d] = true;
@@ -1863,6 +2140,30 @@
                 flowerDatesState[d] = true;
               });
             }
+            // 花束專屬特開日
+            if (Array.isArray(data.flowerSpecialOpenDates)) {
+              data.flowerSpecialOpenDates.forEach(d => {
+                flowerDatesState[d] = true;
+              });
+            }
+            if (Array.isArray(data.thisweekSpecialOpenDates)) {
+              data.thisweekSpecialOpenDates.forEach(d => {
+                thisweekDatesState[d] = true;
+              });
+            }
+            if (Array.isArray(data.orderSpecialOpenDates)) {
+              data.orderSpecialOpenDates.forEach(d => {
+                cakeOrderDatesState[d] = true;
+              });
+            }
+
+            // 更新本地快取 (保持與各前台網站 100% 同步)
+            try {
+              localStorage.setItem("wuyi_cake_date_status_v1", JSON.stringify(cakeOrderDatesState));
+              localStorage.setItem("wuyi_cakethisweek_date_status_v1", JSON.stringify(thisweekDatesState));
+              localStorage.setItem("wuyi_date_status_map_v2", JSON.stringify(flowerDatesState));
+            } catch (e) {}
+
             // 漢堡盒款式自動連動
             const bStyles = data.burgerStyles || data.styles;
             if (Array.isArray(bStyles) && bStyles.length > 0) {
